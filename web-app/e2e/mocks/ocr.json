@@ -4,12 +4,16 @@
     "method": "POST",
     "urlPath": "/v1/chat/completions",
     "bodyPatterns": [
-      { "contains": "transcribe the text in this image" }
+      {
+        "matchesJsonPath": "$.tools[0].function.parameters.properties.text"
+      }
     ]
   },
   "response": {
     "status": 200,
-    "headers": { "Content-Type": "application/json" },
+    "headers": {
+      "Content-Type": "application/json"
+    },
     "jsonBody": {
       "id": "chatcmpl-mock-ocr",
       "object": "chat.completion",
@@ -20,12 +24,26 @@
           "index": 0,
           "message": {
             "role": "assistant",
-            "content": "# Mock Invoice\n\nInvoice number: 2026-001\nTotal: 42,00 EUR\n\nRecognized by the mock OCR stub."
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "ocr-result",
+                "type": "function",
+                "function": {
+                  "name": "submit_document_result",
+                  "arguments": "{\"text\": \"# Mock Invoice\\n\\nInvoice number: 2026-001\\nTotal: 42,00 EUR\\n\\nRecognized by the mock OCR stub.\"}"
+                }
+              }
+            ]
           },
-          "finish_reason": "stop"
+          "finish_reason": "tool_calls"
         }
       ],
-      "usage": { "prompt_tokens": 10, "completion_tokens": 30, "total_tokens": 40 }
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 30,
+        "total_tokens": 40
+      }
     }
   }
 }

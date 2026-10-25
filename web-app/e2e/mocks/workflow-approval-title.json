@@ -4,25 +4,19 @@
     "method": "POST",
     "urlPath": "/v1/chat/completions",
     "bodyPatterns": [
-      { "contains": "E2E-APPROVAL-MARKER" }
+      {
+        "contains": "E2E-APPROVAL-MARKER"
+      }
     ]
   },
   "response": {
     "status": 200,
-    "headers": { "Content-Type": "application/json" },
-    "jsonBody": {
-      "id": "chatcmpl-mock-approval-title",
-      "object": "chat.completion",
-      "created": 1700000000,
-      "model": "gpt-4o-mini",
-      "choices": [
-        {
-          "index": 0,
-          "message": { "role": "assistant", "content": "Approval Suggested Title" },
-          "finish_reason": "stop"
-        }
-      ],
-      "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
-    }
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"id\": \"chatcmpl-mock-metadata\", \"object\": \"chat.completion\", \"created\": 1700000000, \"model\": \"mock\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"result\", \"type\": \"function\", \"function\": {\"name\": \"submit_document_result\", \"arguments\": \"{ {{#each (jsonPath @root.request.body '$.tools[0].function.parameters.required')}}{{#if (eq this 'title')}}\\\"title\\\":\\\"Approval Suggested Title\\\"{{/if}}{{#if (eq this 'tags')}}\\\"tags\\\":[\\\"Invoice\\\",\\\"Test Document\\\"]{{/if}}{{#if (eq this 'correspondent')}}\\\"correspondent\\\":\\\"Mock Corp\\\"{{/if}}{{#if (eq this 'document_type')}}\\\"document_type\\\":\\\"Invoice\\\"{{/if}}{{#if (eq this 'created_date')}}\\\"created_date\\\":\\\"2024-01-15\\\"{{/if}}{{#if (eq this 'custom_fields')}}\\\"custom_fields\\\":{ {{#each (jsonPath @root.request.body '$.tools[0].function.parameters.properties.custom_fields.properties')}}\\\"{{@key}}\\\":\\\"{{#if (contains description 'Gross pay')}}EUR4200.00{{else}}INV-2026-001{{/if}}\\\"{{#unless @last}},{{/unless}}{{/each}} }{{/if}}{{#unless @last}},{{/unless}}{{/each}} }\"}}]}, \"finish_reason\": \"tool_calls\"}], \"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 5, \"total_tokens\": 15}}",
+    "transformers": [
+      "response-template"
+    ]
   }
 }

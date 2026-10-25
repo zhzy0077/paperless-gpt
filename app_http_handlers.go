@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"paperless-gpt/internal/llm"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1168,14 +1169,14 @@ func (app *App) analyzeDocumentsHandler(c *gin.Context) {
 	finalPrompt := promptBuffer.String()
 
 	// Call LLM with the custom prompt and document contexts
-	llmResponse, err := app.LLM.Call(ctx, finalPrompt)
+	llmResponse, err := llm.Generate(ctx, app.LLM, llm.Text(finalPrompt), nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error calling LLM"})
 		log.Errorf("Error calling LLM: %v", err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"result": llmResponse})
+	c.JSON(http.StatusOK, gin.H{"result": llmResponse.Content})
 }
 
 // getVersionHandler handles the GET /api/version endpoint

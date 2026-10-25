@@ -4,468 +4,120 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"image"
-	"io"
+	_ "image/jpeg"
+	_ "image/png"
 	"net/http"
 	"os"
-	"paperless-gpt/internal/openrouterzdr"
-	"paperless-gpt/internal/textsanitize"
 	"strconv"
 	"strings"
 	"time"
 
-	_ "image/jpeg"
-
+	"github.com/cloudwego/eino/schema"
+	"github.com/eino-contrib/jsonschema"
 	"github.com/gabriel-vasile/mimetype"
-	"github.com/sirupsen/logrus"
-	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/anthropic"
-	"github.com/tmc/langchaingo/llms/mistral"
-	"github.com/tmc/langchaingo/llms/ollama"
-	"github.com/tmc/langchaingo/llms/openai"
+	"paperless-gpt/internal/llm"
 	"paperless-gpt/sanitize"
 )
 
-const maxProviderRetryDelay = 15 * time.Minute
-
-// LLMProvider implements OCR using LLM vision models
 type LLMProvider struct {
-	provider    string
-	model       string
-	llm         llms.Model
-	prompt      string
-	maxTokens   int
-	temperature *float64
-	ollamaTopK  *int
+	provider, model, prompt string
+	llm                     llm.Model
 }
 
-// WithPrompt returns a shallow copy of the provider with a different prompt.
-// This enables per-document prompt rendering without mutating shared state.
 func (p *LLMProvider) WithPrompt(prompt string) *LLMProvider {
 	clone := *p
 	clone.prompt = prompt
 	return &clone
 }
-
-// GetPrompt returns the current OCR prompt.
-func (p *LLMProvider) GetPrompt() string {
-	return p.prompt
-}
-
+func (p *LLMProvider) GetPrompt() string { return p.prompt }
 func newLLMProvider(config Config) (*LLMProvider, error) {
-	logger := log.WithFields(logrus.Fields{
-		"provider": config.VisionLLMProvider,
-		"model":    config.VisionLLMModel,
-	})
-	logger.Info("Creating new LLM OCR provider")
-
-	var model llms.Model
-	var err error
-
-	switch strings.ToLower(config.VisionLLMProvider) {
+	c := llm.Config{Provider: config.VisionLLMProvider, Model: config.VisionLLMModel, MaxTokens: config.VisionLLMMaxTokens, Temperature: config.VisionLLMTemperature, ThinkingBudget: config.GoogleAIThinkingBudget}
+	if c.MaxTokens <= 0 {
+		c.MaxTokens = 8192
+	}
+	c.Policy = llm.Policy{RequestsPerMinute: 120, MaxRetries: 8, BackoffMaxWait: 90 * time.Second}
+	if v, e := strconv.Atoi(os.Getenv("VISION_LLM_MAX_RETRIES")); e == nil && v >= 0 {
+		c.Policy.MaxRetries = v
+	}
+	if v, e := time.ParseDuration(os.Getenv("VISION_LLM_BACKOFF_MAX_WAIT")); e == nil && v > 0 {
+		c.Policy.BackoffMaxWait = v
+	}
+	if v, e := strconv.ParseFloat(os.Getenv("VISION_LLM_REQUESTS_PER_MINUTE"), 64); e == nil {
+		c.Policy.RequestsPerMinute = v
+	}
+	switch strings.ToLower(c.Provider) {
 	case "openai":
-		logger.Debug("Initializing OpenAI vision model")
-		model, err = createOpenAIClient(config)
-	case "ollama":
-		logger.Debug("Initializing Ollama vision model")
-		model, err = createOllamaClient(config)
+		c.APIKey = os.Getenv("OPENAI_API_KEY")
+		c.BaseURL = os.Getenv("OPENAI_BASE_URL")
+		c.HTTPClient = OpenAIHTTPClient()
+		c.Azure = strings.EqualFold(os.Getenv("OPENAI_API_TYPE"), "azure")
+		c.APIVersion = os.Getenv("OPENAI_API_VERSION")
 	case "mistral":
-		logger.Debug("Initializing Mistral vision model")
-		model, err = createMistralClient(config)
+		c.APIKey = os.Getenv("MISTRAL_API_KEY")
 	case "anthropic":
-		logger.Debug("Initializing Anthropic vision model")
-		model, err = createAnthropicClient(config)
+		c.APIKey = os.Getenv("ANTHROPIC_API_KEY")
 	case "googleai":
-		logger.Debug("Initializing Google AI vision model")
-		model, err = NewGoogleAIProvider(context.Background(), config.VisionLLMModel, config.GoogleAIAPIKey, config.GoogleAIThinkingBudget)
-	default:
-		return nil, fmt.Errorf("unsupported vision LLM provider: %s", config.VisionLLMProvider)
+		c.APIKey = config.GoogleAIAPIKey
+	case "ollama":
+		c.BaseURL = os.Getenv("OLLAMA_HOST")
+		c.HTTPClient = OllamaHTTPClient()
+		if c.HTTPClient == nil {
+			c.HTTPClient = defaultOllamaClient()
+		} else {
+			c.HTTPClient.Timeout = defaultOllamaClient().Timeout
+		}
+		c.OllamaOptions = map[string]any{}
+		if config.OllamaContextLength > 0 {
+			c.OllamaOptions["num_ctx"] = config.OllamaContextLength
+		}
+		if config.OllamaOcrTopK != nil {
+			c.OllamaOptions["top_k"] = *config.OllamaOcrTopK
+		}
 	}
-
+	m, err := llm.New(context.Background(), c)
 	if err != nil {
-		logger.WithError(err).Error("Failed to create vision LLM client")
-		return nil, fmt.Errorf("error creating vision LLM client: %w", err)
+		return nil, err
 	}
-
-	logger.Info("Successfully initialized LLM OCR provider")
-	return &LLMProvider{
-		provider:    config.VisionLLMProvider,
-		model:       config.VisionLLMModel,
-		llm:         model,
-		prompt:      config.VisionLLMPrompt,
-		maxTokens:   config.VisionLLMMaxTokens,
-		temperature: config.VisionLLMTemperature,
-		ollamaTopK:  config.OllamaOcrTopK,
-	}, nil
+	return &LLMProvider{provider: c.Provider, model: c.Model, prompt: config.VisionLLMPrompt, llm: m}, nil
 }
-
-func (p *LLMProvider) ProcessImage(ctx context.Context, imageContent []byte, pageNumber int) (*OCRResult, error) {
-	logger := log.WithFields(logrus.Fields{
-		"provider": p.provider,
-		"model":    p.model,
-		"page":     pageNumber,
-	})
-	logger.Debug("Starting LLM OCR processing")
-
-	// Detect the content type to handle PDFs differently
-	mtype := mimetype.Detect(imageContent)
-	contentType := mtype.String()
-	isPDF := contentType == "application/pdf"
-	providerName := strings.ToLower(p.provider)
-
-	logger.WithField("content_type", contentType).Debug("Detected content type")
-
-	if isPDF {
-		logger.WithField("pdf_size", len(imageContent)).Debug("Processing PDF content")
-	} else {
-		// Log image dimensions for image content
-		img, _, err := image.Decode(bytes.NewReader(imageContent))
-		if err != nil {
-			logger.WithError(err).Error("Failed to decode image")
+func (p *LLMProvider) ProcessImage(ctx context.Context, data []byte, pageNumber int) (*OCRResult, error) {
+	mediaType := mimetype.Detect(data).String()
+	if mediaType != "application/pdf" {
+		if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
 			return nil, fmt.Errorf("error decoding image: %w", err)
 		}
-		bounds := img.Bounds()
-		logger.WithFields(logrus.Fields{
-			"width":  bounds.Dx(),
-			"height": bounds.Dy(),
-		}).Debug("Image dimensions")
 	}
-
-	logger.Debugf("Prompt length: %d", len(p.prompt))
-
-	// Prepare content parts based on provider type
-	var parts []llms.ContentPart
-	var contentPart llms.ContentPart
-
-	if providerName == "openai" || providerName == "mistral" {
-		logger.Info("Using OpenAI image format")
-		contentPart = llms.ImageURLPart("data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(imageContent))
-	} else if providerName == "googleai" {
-		// GoogleAI supports both images and PDFs via BinaryPart
-		if isPDF {
-			logger.Info("Using GoogleAI PDF format")
-			contentPart = llms.BinaryPart("application/pdf", imageContent)
-		} else {
-			logger.Info("Using GoogleAI image format")
-			contentPart = llms.BinaryPart("image/jpeg", imageContent)
-		}
-	} else {
-		logger.Info("Using binary image format")
-		contentPart = llms.BinaryPart("image/jpeg", imageContent)
+	b64 := base64.StdEncoding.EncodeToString(data)
+	part := schema.MessageInputPart{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{Base64Data: &b64, MIMEType: mediaType}}}
+	if mediaType == "application/pdf" {
+		part = schema.MessageInputPart{Type: schema.ChatMessagePartTypeFileURL, File: &schema.MessageInputFile{MessagePartCommon: schema.MessagePartCommon{Base64Data: &b64, MIMEType: mediaType}}}
 	}
-
-	parts = []llms.ContentPart{
-		contentPart,
-		llms.TextPart(sanitize.Sanitize(p.prompt)),
-	}
-
-	var callOpts []llms.CallOption
-	if p.maxTokens > 0 {
-		callOpts = append(callOpts, llms.WithMaxTokens(p.maxTokens))
-	}
-	if p.temperature != nil {
-		callOpts = append(callOpts, llms.WithTemperature(*p.temperature))
-	}
-	if providerName == "ollama" && p.ollamaTopK != nil {
-		callOpts = append(callOpts, llms.WithTopK(*p.ollamaTopK))
-	}
-
-	// Convert the image to text, retrying transient upstream errors (429/5xx)
-	// so a brief provider congestion window doesn't fail the whole document.
-	// Reuses the VISION_LLM_* retry settings that already apply to suggestion LLM calls.
-	// Defaults are deliberately higher than the suggestion path's (3 retries / 30s in
-	// getRateLimitConfig): a failed page forfeits the whole document, and there is no
-	// page-level resume, so a 100-page document dying on page 99 re-buys 99 pages on
-	// the next attempt. The sunk cost grows with document length, so OCR tolerates
-	// much longer provider hiccups before giving up.
-	maxRetries := 8
-	if v, convErr := strconv.Atoi(os.Getenv("VISION_LLM_MAX_RETRIES")); convErr == nil && v >= 0 {
-		maxRetries = v
-	}
-	backoffMax := 90 * time.Second
-	if d, parseErr := time.ParseDuration(os.Getenv("VISION_LLM_BACKOFF_MAX_WAIT")); parseErr == nil && d > 0 {
-		backoffMax = d
-	}
-
-	logger.Debug("Sending request to vision model")
-	var completion *llms.ContentResponse
-	var genErr error
-	for attempt := 0; ; attempt++ {
-		completion, genErr = p.llm.GenerateContent(ctx, []llms.MessageContent{
-			{
-				Parts: parts,
-				Role:  llms.ChatMessageTypeHuman,
-			},
-		}, callOpts...)
-		if genErr == nil {
-			break
-		}
-		msg := genErr.Error()
-		transient := strings.Contains(msg, "status code: 429") || strings.Contains(msg, "status code: 5")
-		if !transient || attempt >= maxRetries {
-			logger.WithError(genErr).Error("Failed to get response from vision model")
-			return nil, fmt.Errorf("error getting response from LLM: %w", genErr)
-		}
-		backoff := time.Duration(1<<uint(attempt)) * time.Second
-		if backoff <= 0 || backoff > backoffMax {
-			// <= 0 guards int64 overflow of the shift at high attempt counts,
-			// which would otherwise skip the backoff entirely.
-			backoff = backoffMax
-		}
-		backoff = retryAfterDelay(genErr, backoff)
-		if backoff > maxProviderRetryDelay {
-			return nil, fmt.Errorf("provider retry delay %s exceeds limit", backoff)
-		}
-		logger.WithError(genErr).Warnf("Transient vision model error, retrying in %s (attempt %d/%d)", backoff, attempt+1, maxRetries)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(backoff):
-		}
-	}
-
-	text := textsanitize.StripReasoning(completion.Choices[0].Content)
-	// Some vision models wrap their whole answer in a ```markdown … ``` fence;
-	// strip it so the recognized text isn't polluted with model scaffolding.
-	text = textsanitize.StripCodeFences(text)
-	if strings.TrimSpace(text) == "" {
-		// Keep the page as blank rather than failing the whole document, but
-		// say why: stop_reason=length with no text usually means a thinking
-		// model spent the whole VISION_LLM_MAX_TOKENS budget on reasoning.
-		logger.WithField("stop_reason", completion.Choices[0].StopReason).
-			Warn("Vision model returned no text for this page; keeping it blank")
-	}
-	limitHit := false
-	tokenCount := -1
-
-	if p.maxTokens > 0 {
-		genInfo := completion.Choices[0].GenerationInfo
-		if genInfo != nil && genInfo["TotalTokens"] != nil {
-			if v, ok := genInfo["TotalTokens"].(int); ok {
-				tokenCount = v
-			}
-		}
-		// Fallback: count tokens using langchaingo (might not be accurate for all models)
-		if tokenCount < 0 {
-			tokenCount = llms.CountTokens(p.model, text)
-		}
-		if tokenCount >= p.maxTokens {
-			limitHit = true
-		}
-	}
-
-	result := &OCRResult{
-		Text: text,
-		Metadata: map[string]string{
-			"provider": p.provider,
-			"model":    p.model,
-		},
-		OcrLimitHit:    limitHit,
-		GenerationInfo: completion.Choices[0].GenerationInfo,
-	}
-
-	logger.WithField("content_length", len(result.Text)).WithFields(completion.Choices[0].GenerationInfo).Info("Successfully processed image")
-	return result, nil
-}
-
-// createOpenAIClient creates a new OpenAI vision model client
-func createOpenAIClient(config Config) (llms.Model, error) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("OpenAI API key is not set")
-	}
-	return openai.New(
-		openai.WithModel(config.VisionLLMModel),
-		openai.WithToken(apiKey),
-		openai.WithHTTPClient(OpenAIHTTPClient()),
-	)
-}
-
-// ParseHeaderList parses a comma-separated list of Key=Value pairs, the
-// format of OLLAMA_HEADERS and OPENAI_HEADERS. Spaces around keys and values
-// are dropped ("X-Team = docs" would otherwise be an invalid header name that
-// fails every request); malformed pairs are ignored.
-func ParseHeaderList(raw string) map[string]string {
-	headers := map[string]string{}
-	for _, pair := range strings.Split(raw, ",") {
-		key, value, ok := strings.Cut(pair, "=")
-		key = http.CanonicalHeaderKey(strings.TrimSpace(key))
-		if ok && key != "" {
-			headers[key] = strings.TrimSpace(value)
-		}
-	}
-	return headers
-}
-
-// OllamaHTTPClient returns an *http.Client with headers from OLLAMA_HEADERS injected,
-// or nil if OLLAMA_HEADERS is not set.
-func OllamaHTTPClient() *http.Client {
-	headers := ParseHeaderList(os.Getenv("OLLAMA_HEADERS"))
-	if len(headers) == 0 {
-		return nil
-	}
-	return headerClient(headers)
-}
-
-// OpenAIHTTPClient returns the client for every OpenAI-compatible request:
-// text LLM, vision LLM and LLM OCR. It sends X-Title and the OPENAI_HEADERS.
-// It is a client of its own on purpose: those headers can carry gateway
-// credentials and must never reach other hosts through http.DefaultClient.
-func OpenAIHTTPClient() *http.Client {
-	headers := map[string]string{http.CanonicalHeaderKey("X-Title"): "paperless-gpt"}
-	for key, value := range ParseHeaderList(os.Getenv("OPENAI_HEADERS")) {
-		headers[key] = value
-	}
-	client := headerClient(headers)
-	// OPENROUTER_ENFORCE_ZDR: a passthrough unless enabled and the request goes
-	// to openrouter.ai; see internal/openrouterzdr. It sits below the header
-	// transport, so it covers the text LLM, the vision LLM and LLM OCR alike.
-	client.Transport.(*headerTransport).base = openrouterzdr.NewTransport(http.DefaultTransport)
-	return client
-}
-
-// headerClient adds headers to every request. The headers are configured for
-// one endpoint and may be credentials, so the client refuses to follow a
-// redirect to another host: the transport would add them there too.
-func headerClient(headers map[string]string) *http.Client {
-	return &http.Client{
-		Transport: &headerTransport{base: http.DefaultTransport, headers: headers},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			if req.URL.Host != via[0].URL.Host {
-				return fmt.Errorf("refusing to follow a redirect from %s to %s with configured headers", via[0].URL.Host, req.URL.Host)
-			}
-			return nil
-		},
-	}
-}
-
-type headerTransport struct {
-	base    http.RoundTripper
-	headers map[string]string
-}
-
-func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
-		maxSeconds := int64((1<<63 - 1) / int64(time.Second))
-		if seconds <= maxSeconds {
-			return time.Duration(seconds) * time.Second, true
-		}
-		return 0, false
-	}
-	when, err := http.ParseTime(value)
+	spec := llm.Object(map[string]*jsonschema.Schema{"text": {Type: "string", Description: "Complete transcription of the document page, preserving the text, row associations and formatting. Include only document content."}})
+	out, err := llm.Generate(ctx, p.llm, []*schema.Message{{Role: schema.User, UserInputMultiContent: []schema.MessageInputPart{part, {Type: schema.ChatMessagePartTypeText, Text: sanitize.Sanitize(p.prompt)}}}}, spec)
 	if err != nil {
-		return 0, false
+		return nil, fmt.Errorf("OCR page %d: %w", pageNumber, err)
 	}
-	if delay := when.Sub(now); delay > 0 {
-		// Preserve the provider's lower bound when the transport serializes
-		// this duration to milliseconds; truncation could retry early.
-		whole := delay / time.Millisecond
-		if delay%time.Millisecond != 0 {
-			const maxWholeMilliseconds = int64((1<<63 - 1) / int64(time.Millisecond))
-			if int64(whole) < maxWholeMilliseconds {
-				whole++
+	var value struct {
+		Text string `json:"text"`
+	}
+	if err = json.Unmarshal([]byte(out.Content), &value); err != nil {
+		return nil, err
+	}
+	return &OCRResult{Text: value.Text, Metadata: map[string]string{"provider": p.provider, "model": p.model}, GenerationInfo: llm.Usage(out)}, nil
+}
+
+func defaultOllamaClient() *http.Client {
+	timeout := 300 * time.Second
+	if raw := os.Getenv("OLLAMA_TIMEOUT_SECONDS"); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil {
+			timeout = time.Duration(seconds) * time.Second
+			if seconds <= 0 {
+				timeout = 0
 			}
 		}
-		return time.Duration(whole) * time.Millisecond, true
 	}
-	return 0, true
-}
-
-func retryAfterDelay(err error, backoff time.Duration) time.Duration {
-	const marker = "retry-after-ms:"
-	text := strings.ToLower(err.Error())
-	index := strings.Index(text, marker)
-	if index < 0 {
-		return backoff
-	}
-	value := text[index+len(marker):]
-	end := 0
-	for end < len(value) && value[end] >= '0' && value[end] <= '9' {
-		end++
-	}
-	if end == 0 {
-		return backoff
-	}
-	milliseconds, parseErr := strconv.ParseInt(value[:end], 10, 64)
-	maxMilliseconds := int64((1<<63 - 1) / int64(time.Millisecond))
-	if parseErr != nil || milliseconds < 0 || milliseconds > maxMilliseconds {
-		return backoff
-	}
-	delay := time.Duration(milliseconds) * time.Millisecond
-	if delay > backoff {
-		return delay
-	}
-	return backoff
-}
-
-func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	for k, v := range t.headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := t.base.RoundTrip(req)
-	if err != nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
-		return resp, err
-	}
-	delay, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-	if !ok {
-		return resp, nil
-	}
-	_ = resp.Body.Close()
-	// langchaingo drops response headers from provider errors. Preserve only
-	// the parsed cooldown in a sanitized JSON error body so RateLimitedLLM can
-	// honor it without exposing the upstream response or credentials.
-	resp.Body = io.NopCloser(strings.NewReader(fmt.Sprintf(
-		`{"error":{"message":"upstream rate limit; retry-after-ms:%d"}}`,
-		delay.Milliseconds())))
-	resp.ContentLength = int64(-1)
-	return resp, nil
-}
-
-// createOllamaClient creates a new Ollama vision model client
-func createOllamaClient(config Config) (llms.Model, error) {
-	host := os.Getenv("OLLAMA_HOST")
-	if host == "" {
-		host = "http://127.0.0.1:11434"
-	}
-	opts := []ollama.Option{
-		ollama.WithModel(config.VisionLLMModel),
-		ollama.WithServerURL(host),
-	}
-	if config.OllamaContextLength > 0 {
-		opts = append(opts, ollama.WithRunnerNumCtx(config.OllamaContextLength))
-	}
-	if client := OllamaHTTPClient(); client != nil {
-		opts = append(opts, ollama.WithHTTPClient(client))
-	}
-	return ollama.New(opts...)
-}
-
-// createMistralClient creates a new Mistral vision model client
-func createMistralClient(config Config) (llms.Model, error) {
-	apiKey := os.Getenv("MISTRAL_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("Mistral API key is not set")
-	}
-	return mistral.New(
-		mistral.WithModel(config.VisionLLMModel),
-		mistral.WithAPIKey(apiKey),
-	)
-}
-
-// createAnthropicClient creates a new Anthropic vision model client
-func createAnthropicClient(config Config) (llms.Model, error) {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("Anthropic API key is not set")
-	}
-	return anthropic.New(
-		anthropic.WithModel(config.VisionLLMModel),
-		anthropic.WithToken(apiKey),
-	)
+	return &http.Client{Timeout: timeout}
 }

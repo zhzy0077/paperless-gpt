@@ -9,8 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 	"github.com/stretchr/testify/assert"
-	"github.com/tmc/langchaingo/llms"
+	"os"
+	"paperless-gpt/internal/llm"
+	"strconv"
 )
 
 // fakeVisionLLM returns the queued errors in order, then succeeds.
@@ -19,17 +23,13 @@ type fakeVisionLLM struct {
 	calls int
 }
 
-func (f *fakeVisionLLM) GenerateContent(ctx context.Context, messages []llms.MessageContent, options ...llms.CallOption) (*llms.ContentResponse, error) {
+func (f *fakeVisionLLM) Generate(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
 	i := f.calls
 	f.calls++
 	if i < len(f.errs) {
 		return nil, f.errs[i]
 	}
-	return &llms.ContentResponse{Choices: []*llms.ContentChoice{{Content: "ocr text"}}}, nil
-}
-
-func (f *fakeVisionLLM) Call(ctx context.Context, prompt string, options ...llms.CallOption) (string, error) {
-	return "", errors.New("not used")
+	return &schema.Message{ToolCalls: []schema.ToolCall{{Type: "function", Function: schema.FunctionCall{Name: llm.ResultTool, Arguments: `{"text":"ocr text"}`}}}}, nil
 }
 
 func testJPEG(t *testing.T) []byte {
@@ -40,11 +40,11 @@ func testJPEG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func retryTestProvider(llm llms.Model) *LLMProvider {
+func retryTestProvider(m llm.Model) *LLMProvider {
 	return &LLMProvider{
 		provider: "openai",
 		model:    "test-model",
-		llm:      llm,
+		llm:      llm.WithPolicy(m, visionTestPolicy()),
 		prompt:   "OCR this",
 	}
 }
@@ -120,4 +120,16 @@ func TestProcessImage_ZeroRetriesRestoresFailFast(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Equal(t, 1, llm.calls)
+}
+
+func visionTestPolicy() llm.Policy {
+	retries := 8
+	if v, e := strconv.Atoi(os.Getenv("VISION_LLM_MAX_RETRIES")); e == nil {
+		retries = v
+	}
+	wait := 90 * time.Second
+	if v, e := time.ParseDuration(os.Getenv("VISION_LLM_BACKOFF_MAX_WAIT")); e == nil {
+		wait = v
+	}
+	return llm.Policy{MaxRetries: retries, BackoffMaxWait: wait}
 }

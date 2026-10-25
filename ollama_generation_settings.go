@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	ollamaapi "github.com/ollama/ollama/api"
+	ollamaapi "github.com/cloudwego/eino-ext/components/model/ollama"
 )
 
 // OllamaMetadataConfig configures metadata generation requests sent to native
@@ -87,25 +87,20 @@ func (s OllamaGenerationSettings) Validate() error {
 	return nil
 }
 
-func validateOllamaMetadataConfig(config OllamaMetadataConfig) error {
-	if err := config.Defaults.Validate(); err != nil {
-		return fmt.Errorf("validate Ollama defaults: %w", err)
-	}
-	return nil
-}
-
-func parseOllamaKeepAlive(value string) (*ollamaapi.Duration, error) {
+func parseOllamaKeepAlive(value string) (*time.Duration, error) {
 	if value == "0" {
-		return &ollamaapi.Duration{Duration: 0}, nil
+		value := time.Duration(0)
+		return &value, nil
 	}
 	if value == "-1" {
-		return &ollamaapi.Duration{Duration: -1}, nil
+		value := time.Duration(-1)
+		return &value, nil
 	}
 	duration, err := time.ParseDuration(value)
 	if err != nil || duration < 0 {
 		return nil, fmt.Errorf("invalid Ollama keep_alive %q", value)
 	}
-	return &ollamaapi.Duration{Duration: duration}, nil
+	return &duration, nil
 }
 
 func ollamaThinkValue(raw json.RawMessage) (*ollamaapi.ThinkValue, error) {
@@ -136,102 +131,4 @@ func validateOllamaFormat(raw json.RawMessage) error {
 		return nil
 	}
 	return fmt.Errorf("invalid Ollama format (expected \"json\" or a non-empty JSON object)")
-}
-
-func (s OllamaGenerationSettings) clone() OllamaGenerationSettings {
-	result := OllamaGenerationSettings{
-		Temperature: cloneFloat(s.Temperature), MaxTokens: cloneInt(s.MaxTokens), ContextLength: cloneInt(s.ContextLength), KeepAlive: cloneString(s.KeepAlive),
-		TopK: cloneInt(s.TopK), TopP: cloneFloat(s.TopP), MinP: cloneFloat(s.MinP), Seed: cloneInt(s.Seed), RepeatPenalty: cloneFloat(s.RepeatPenalty),
-		RepeatLastN: cloneInt(s.RepeatLastN), FrequencyPenalty: cloneFloat(s.FrequencyPenalty), PresencePenalty: cloneFloat(s.PresencePenalty),
-	}
-	if s.Think != nil {
-		result.Think = append(json.RawMessage(nil), s.Think...)
-	}
-	if s.Format != nil {
-		result.Format = append(json.RawMessage(nil), s.Format...)
-	}
-	if s.Stop != nil {
-		copied := make([]string, len(*s.Stop))
-		copy(copied, *s.Stop)
-		result.Stop = &copied
-	}
-	return result
-}
-
-func (s OllamaGenerationSettings) overlay(overrides OllamaGenerationSettings) OllamaGenerationSettings {
-	result := s.clone()
-	if overrides.Temperature != nil {
-		result.Temperature = cloneFloat(overrides.Temperature)
-	}
-	if overrides.MaxTokens != nil {
-		result.MaxTokens = cloneInt(overrides.MaxTokens)
-	}
-	if overrides.ContextLength != nil {
-		result.ContextLength = cloneInt(overrides.ContextLength)
-	}
-	if overrides.KeepAlive != nil {
-		result.KeepAlive = cloneString(overrides.KeepAlive)
-	}
-	if overrides.Think != nil {
-		result.Think = append(json.RawMessage(nil), overrides.Think...)
-	}
-	if overrides.Format != nil {
-		result.Format = append(json.RawMessage(nil), overrides.Format...)
-	}
-	if overrides.TopK != nil {
-		result.TopK = cloneInt(overrides.TopK)
-	}
-	if overrides.TopP != nil {
-		result.TopP = cloneFloat(overrides.TopP)
-	}
-	if overrides.MinP != nil {
-		result.MinP = cloneFloat(overrides.MinP)
-	}
-	if overrides.Seed != nil {
-		result.Seed = cloneInt(overrides.Seed)
-	}
-	if overrides.RepeatPenalty != nil {
-		result.RepeatPenalty = cloneFloat(overrides.RepeatPenalty)
-	}
-	if overrides.RepeatLastN != nil {
-		result.RepeatLastN = cloneInt(overrides.RepeatLastN)
-	}
-	if overrides.FrequencyPenalty != nil {
-		result.FrequencyPenalty = cloneFloat(overrides.FrequencyPenalty)
-	}
-	if overrides.PresencePenalty != nil {
-		result.PresencePenalty = cloneFloat(overrides.PresencePenalty)
-	}
-	if overrides.Stop != nil {
-		copied := make([]string, len(*overrides.Stop))
-		copy(copied, *overrides.Stop)
-		result.Stop = &copied
-	}
-	return result
-}
-
-func cloneFloat(value *float64) *float64 {
-	if value == nil {
-		return nil
-	}
-	copied := *value
-	return &copied
-}
-func cloneInt(value *int) *int {
-	if value == nil {
-		return nil
-	}
-	copied := *value
-	return &copied
-}
-func cloneString(value *string) *string {
-	if value == nil {
-		return nil
-	}
-	copied := *value
-	return &copied
-}
-
-func (config OllamaMetadataConfig) clone() OllamaMetadataConfig {
-	return OllamaMetadataConfig{Defaults: config.Defaults.clone()}
 }

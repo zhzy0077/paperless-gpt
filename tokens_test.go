@@ -1,16 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
 	"os"
 	"strconv"
 	"testing"
-	"text/template"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tmc/langchaingo/textsplitter"
 )
 
 // resetTokenLimit parses TOKEN_LIMIT from environment and sets the tokenLimit variable
@@ -66,67 +62,6 @@ func TestTokenLimit(t *testing.T) {
 			resetTokenLimit()
 
 			assert.Equal(t, tc.wantLimit, tokenLimit)
-		})
-	}
-}
-
-func TestGetAvailableTokensForContent(t *testing.T) {
-	// Save current env and restore after test
-	originalLimit := os.Getenv("TOKEN_LIMIT")
-	defer os.Setenv("TOKEN_LIMIT", originalLimit)
-
-	// Test template
-	tmpl := template.Must(template.New("test").Parse("Template with {{.Var1}} and {{.Content}}"))
-
-	tests := []struct {
-		name      string
-		limit     int
-		data      map[string]interface{}
-		wantCount int
-		wantErr   bool
-	}{
-		{
-			name:      "disabled token limit",
-			limit:     0,
-			data:      map[string]interface{}{"Var1": "test"},
-			wantCount: -1,
-			wantErr:   false,
-		},
-		{
-			name:  "template exceeds limit",
-			limit: 2,
-			data: map[string]interface{}{
-				"Var1": "test",
-			},
-			wantCount: 0,
-			wantErr:   true,
-		},
-		{
-			name:  "available tokens calculation",
-			limit: 100,
-			data: map[string]interface{}{
-				"Var1": "test",
-			},
-			wantCount: 85,
-			wantErr:   false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// Set token limit
-			os.Setenv("TOKEN_LIMIT", fmt.Sprintf("%d", tc.limit))
-			// Set tokenLimit based on environment
-			resetTokenLimit()
-
-			count, err := getAvailableTokensForContent(tmpl, tc.data)
-
-			if tc.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tc.wantCount, count)
-			}
 		})
 	}
 }
@@ -200,102 +135,6 @@ func TestTruncateContentByTokens(t *testing.T) {
 				assert.True(t, len(result) < len(tc.content), "Content should be truncated")
 			} else {
 				assert.Equal(t, tc.content, result, "Content should not be truncated")
-			}
-		})
-	}
-}
-
-func TestTokenLimitIntegration(t *testing.T) {
-	// Save current env and restore after test
-	originalLimit := os.Getenv("TOKEN_LIMIT")
-	defer os.Setenv("TOKEN_LIMIT", originalLimit)
-
-	// Create a test template
-	tmpl := template.Must(template.New("test").Parse(`
-Template with variables:
-Language: {{.Language}}
-Title: {{.Title}}
-Content: {{.Content}}
-`))
-
-	// Test data
-	data := map[string]interface{}{
-		"Language": "English",
-		"Title":    "Test Document",
-	}
-
-	// Test with different token limits
-	tests := []struct {
-		name      string
-		limit     int
-		content   string
-		wantSize  int
-		wantError bool
-	}{
-		{
-			name:      "no limit",
-			limit:     0,
-			content:   "original content",
-			wantSize:  len("original content"),
-			wantError: false,
-		},
-		{
-			name:      "sufficient limit",
-			limit:     1000,
-			content:   "original content",
-			wantSize:  len("original content"),
-			wantError: false,
-		},
-		{
-			name:      "tight limit",
-			limit:     50,
-			content:   "This is a long content that should be truncated to fit within the token limit",
-			wantSize:  50,
-			wantError: false,
-		},
-		{
-			name:      "very small limit",
-			limit:     3,
-			content:   "Content too large for small limit",
-			wantError: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// Set token limit
-			os.Setenv("TOKEN_LIMIT", fmt.Sprintf("%d", tc.limit))
-			// Set tokenLimit based on environment
-			resetTokenLimit()
-
-			// First get available tokens
-			availableTokens, err := getAvailableTokensForContent(tmpl, data)
-			if tc.wantError {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-
-			// Then truncate content
-			truncated, err := truncateContentByTokens(tc.content, availableTokens)
-			require.NoError(t, err)
-
-			// Finally execute template with truncated content
-			data["Content"] = truncated
-			var result string
-			{
-				var buf bytes.Buffer
-				err = tmpl.Execute(&buf, data)
-				require.NoError(t, err)
-				result = buf.String()
-			}
-
-			// Verify final size is within limit if limit is enabled
-			if tc.limit > 0 {
-				splitter := textsplitter.NewTokenSplitter()
-				tokens, err := splitter.SplitText(result)
-				require.NoError(t, err)
-				assert.LessOrEqual(t, len(tokens), tc.limit)
 			}
 		})
 	}

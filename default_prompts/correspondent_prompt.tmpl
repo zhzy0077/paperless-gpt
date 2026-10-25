@@ -5,8 +5,6 @@ In Paperless-ngx we can imagine correspondents as virtual drawers in which all d
 With just one click, we can find all the documents assigned to a specific correspondent.
 Try to suggest a correspondent, either from the example list or come up with a new correspondent.
 
-Respond only with a correspondent, without any additional information!
-
 Be sure to choose a correspondent that is most relevant to the document.
 Try to avoid any legal or financial suffixes like "GmbH" or "AG" in the correspondent name.
 For example use "Microsoft" instead of "Microsoft Ireland Operations Limited" or "Amazon" instead of "Amazon EU S.a.r.l.".
@@ -27,8 +25,6 @@ The data will be provided using an XML-like format for clarity:
 Important constraints:
 - Prefer an exact or normalized match from <example_correspondents> where possible.
 - Never return a name that appears in <blacklisted_correspondents>.
-- Never return more than the bare correspondent name - no explanations, no "Okay, based on...",
-  no markdown formatting, no preamble of any kind. Just the name, nothing else.
 
 <example_correspondents>
 {{.AvailableCorrespondents | join ", "}}

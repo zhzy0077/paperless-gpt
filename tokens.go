@@ -1,53 +1,18 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"text/template"
+	"sync"
 
-	"github.com/tmc/langchaingo/llms"
+	"github.com/pkoukk/tiktoken-go"
 )
 
-// getAvailableTokensForContent calculates how many tokens are available for content
-// by rendering the template with empty content and counting tokens
-func getAvailableTokensForContent(tmpl *template.Template, data map[string]interface{}) (int, error) {
-	if tokenLimit <= 0 {
-		return -1, nil // No limit when disabled
-	}
-
-	// Create a copy of data and set "Content" to empty
-	templateData := make(map[string]interface{})
-	for k, v := range data {
-		templateData[k] = v
-	}
-	templateData["Content"] = ""
-
-	// Execute template with empty content
-	var promptBuffer bytes.Buffer
-	if err := tmpl.Execute(&promptBuffer, templateData); err != nil {
-		return 0, fmt.Errorf("error executing template: %v", err)
-	}
-
-	// Count tokens in prompt template
-	promptTokens, err := getTokenCount(promptBuffer.String())
-	if err != nil {
-		return 0, fmt.Errorf("error counting tokens in prompt: %v", err)
-	}
-	log.Debugf("Prompt template uses %d tokens", promptTokens)
-
-	// Add safety margin for prompt tokens
-	promptTokens += 10
-
-	// Calculate available tokens for content
-	availableTokens := tokenLimit - promptTokens
-	if availableTokens < 0 {
-		return 0, fmt.Errorf("prompt template exceeds token limit")
-	}
-	return availableTokens, nil
-}
-
 func getTokenCount(content string) (int, error) {
-	return llms.CountTokens(llmModel, content), nil
+	tokenizerOnce.Do(func() { tokenizer, tokenizerErr = tiktoken.GetEncoding("cl100k_base") })
+	if tokenizerErr != nil {
+		return 0, tokenizerErr
+	}
+	return len(tokenizer.Encode(content, nil, nil)), nil
 }
 
 // truncateContentByTokens truncates the content so that its token count does not exceed availableTokens.
@@ -97,3 +62,7 @@ func truncateContentByTokens(content string, availableTokens int) (string, error
 	}
 	return truncated, nil
 }
+
+var tokenizerOnce sync.Once
+var tokenizer *tiktoken.Tiktoken
+var tokenizerErr error

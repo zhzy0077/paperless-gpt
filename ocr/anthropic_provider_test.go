@@ -42,7 +42,7 @@ func TestCreateAnthropicClient(t *testing.T) {
 			apiKey:      "",
 			config:      Config{VisionLLMModel: "claude-sonnet-4-5"},
 			wantErr:     true,
-			errContains: "Anthropic API key is not set",
+			errContains: "anthropic API key is not set",
 		},
 	}
 
@@ -50,7 +50,9 @@ func TestCreateAnthropicClient(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			os.Setenv("ANTHROPIC_API_KEY", tt.apiKey)
 
-			client, err := createAnthropicClient(tt.config)
+			cfg := tt.config
+			cfg.VisionLLMProvider = "anthropic"
+			client, err := newLLMProvider(cfg)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -97,7 +99,7 @@ func TestNewLLMProvider_Anthropic(t *testing.T) {
 				VisionLLMModel:    "claude-sonnet-4-5",
 			},
 			wantErr:     true,
-			errContains: "Anthropic API key is not set",
+			errContains: "anthropic API key is not set",
 		},
 	}
 
@@ -147,7 +149,4 @@ func TestNewLLMProvider_AnthropicWithOptions(t *testing.T) {
 	assert.Equal(t, "anthropic", provider.provider)
 	assert.Equal(t, "claude-sonnet-4-5", provider.model)
 	assert.Equal(t, "Extract text from this image", provider.prompt)
-	assert.Equal(t, 4096, provider.maxTokens)
-	assert.NotNil(t, provider.temperature)
-	assert.Equal(t, 0.7, *provider.temperature)
 }

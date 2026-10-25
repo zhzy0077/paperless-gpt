@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"paperless-gpt/internal/llm"
 	"testing"
 	"time"
 
@@ -150,7 +151,7 @@ func TestCreateLLMOllamaAppliesTimeout(t *testing.T) {
 	require.NoError(t, err)
 
 	start := time.Now()
-	_, err = model.Call(context.Background(), "Return a title")
+	_, err = model.Generate(context.Background(), llm.Text("Return a title"))
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "a stalled Ollama server must fail the call, not block the loop")

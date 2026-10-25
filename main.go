@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -26,12 +27,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
-	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/anthropic"
-	"github.com/tmc/langchaingo/llms/mistral"
-	"github.com/tmc/langchaingo/llms/ollama"
-	"github.com/tmc/langchaingo/llms/openai"
 	"gorm.io/gorm"
+	"paperless-gpt/internal/llm"
 )
 
 // Global Variables and Constants
@@ -138,8 +135,7 @@ func refreshCustomFieldsCache(ctx context.Context, client ClientInterface) {
 type App struct {
 	Client             ClientInterface
 	Database           *gorm.DB
-	LLM                llms.Model
-	VisionLLM          llms.Model
+	LLM                llm.Model
 	ocrProvider        ocr.Provider           // OCR provider interface
 	ocrProcessMode     string                 // OCR processing mode: "image" (default), "pdf" or "whole_pdf"
 	docProcessor       DocumentProcessor      // Optional: Can be used for mocking
@@ -283,12 +279,6 @@ func main() {
 	llm, err := createLLM()
 	if err != nil {
 		log.Fatalf("Failed to create LLM client: %v", err)
-	}
-
-	// Initialize Vision LLM
-	visionLlm, err := createVisionLLM()
-	if err != nil {
-		log.Fatalf("Failed to create Vision LLM client: %v", err)
 	}
 
 	// Initialize OCR provider
@@ -445,7 +435,6 @@ func main() {
 		Client:             client,
 		Database:           database,
 		LLM:                llm,
-		VisionLLM:          visionLlm,
 		ocrProvider:        ocrProvider,
 		ocrProcessMode:     ocrProcessMode,
 		docProcessor:       nil, // App itself implements DocumentProcessor
@@ -1229,13 +1218,10 @@ func loadTemplates() error {
 }
 
 // getRateLimitConfig gets rate limiting configuration from environment variables
-// with LLM or VISION_LLM prefixes or default values
-func getRateLimitConfig(isVision bool) RateLimitConfig {
-	// Use LLM or VISION_LLM prefix based on the type of LLM
+// for metadata and analysis requests.
+func getRateLimitConfig() llm.Policy {
+	// Metadata and analysis share a request policy.
 	prefix := "LLM_"
-	if isVision {
-		prefix = "VISION_LLM_"
-	}
 
 	// Read environment variables with appropriate prefix
 	rpmStr := os.Getenv(prefix + "REQUESTS_PER_MINUTE")
@@ -1264,237 +1250,81 @@ func getRateLimitConfig(isVision bool) RateLimitConfig {
 		}
 	}
 
-	return RateLimitConfig{
+	return llm.Policy{
 		RequestsPerMinute: rpm,
 		MaxRetries:        maxRetries,
 		BackoffMaxWait:    backoffMaxWait,
 	}
 }
 
-// createLLM creates the appropriate LLM client based on the provider
-func createLLM() (llms.Model, error) {
-	if strings.ToLower(llmProvider) != "ollama" {
-		if temperature := os.Getenv("LLM_TEMPERATURE"); temperature != "" {
-			log.Warn("LLM_TEMPERATURE only applies when LLM_PROVIDER=ollama; ignoring")
-		}
-		for _, name := range []string{"LLM_MAX_TOKENS", "OLLAMA_KEEP_ALIVE", "OLLAMA_THINK"} {
-			if value := os.Getenv(name); value != "" {
-				log.Warnf("%s only applies when LLM_PROVIDER=ollama; ignoring", name)
-			}
-		}
-	}
-
+// createLLM builds the metadata/analysis model through the shared Eino factory.
+func createLLM() (llm.Model, error) {
+	c := llm.Config{Provider: llmProvider, Model: llmModel, MaxTokens: 8192, Policy: getRateLimitConfig()}
 	switch strings.ToLower(llmProvider) {
-	case "mistral":
-		mistralApiKey := os.Getenv("MISTRAL_API_KEY")
-		if mistralApiKey == "" {
-			return nil, fmt.Errorf("Mistral API key is not set")
-		}
-		llm, err := mistral.New(
-			mistral.WithModel(llmModel),
-			mistral.WithAPIKey(mistralApiKey),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Apply rate limiting with isVision=false
-		return NewRateLimitedLLM(llm, getRateLimitConfig(false)), nil
 	case "openai":
-		if openaiAPIKey == "" {
-			return nil, fmt.Errorf("OpenAI API key is not set")
+		c.APIKey = openaiAPIKey
+		c.BaseURL = os.Getenv("OPENAI_BASE_URL")
+		c.HTTPClient = createCustomHTTPClient()
+		c.Azure = strings.EqualFold(os.Getenv("OPENAI_API_TYPE"), "azure")
+		c.APIVersion = os.Getenv("OPENAI_API_VERSION")
+		if c.Azure && c.BaseURL == "" {
+			return nil, fmt.Errorf("OPENAI_BASE_URL is required for Azure OpenAI")
 		}
-
-		options := []openai.Option{
-			openai.WithModel(llmModel),
-			openai.WithToken(openaiAPIKey),
-			openai.WithHTTPClient(createCustomHTTPClient()),
-		}
-
-		if strings.ToLower(os.Getenv("OPENAI_API_TYPE")) == "azure" {
-			baseURL := os.Getenv("OPENAI_BASE_URL")
-			if baseURL == "" {
-				return nil, fmt.Errorf("OPENAI_BASE_URL is required for Azure OpenAI")
+	case "mistral":
+		c.APIKey = os.Getenv("MISTRAL_API_KEY")
+	case "anthropic":
+		c.APIKey = os.Getenv("ANTHROPIC_API_KEY")
+	case "googleai":
+		c.APIKey = os.Getenv("GOOGLEAI_API_KEY")
+		c.ThinkingBudget = googleThinkingBudget
+		if value := os.Getenv("GOOGLEAI_THINKING_BUDGET"); value != "" {
+			if n, e := strconv.ParseInt(value, 10, 32); e == nil {
+				budget := int32(n)
+				c.ThinkingBudget = &budget
 			}
-			options = append(options,
-				openai.WithAPIType(openai.APITypeAzure),
-				openai.WithBaseURL(baseURL),
-				openai.WithEmbeddingModel("this-is-not-used"), // This is mandatory for Azure by langchain-go
-			)
-		} else if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-			// OpenAI-compatible endpoints (OpenRouter, LiteLLM, vLLM, mock
-			// servers in E2E tests, ...)
-			options = append(options, openai.WithBaseURL(baseURL))
 		}
-
-		llm, err := openai.New(options...)
-		if err != nil {
-			return nil, err
-		}
-
-		// Apply rate limiting with isVision=false
-		return NewRateLimitedLLM(llm, getRateLimitConfig(false)), nil
 	case "ollama":
-		host := os.Getenv("OLLAMA_HOST")
-		if host == "" {
-			host = "http://127.0.0.1:11434"
-		}
+		c.BaseURL = os.Getenv("OLLAMA_HOST")
+		c.HTTPClient = ollamaHTTPClientWithTimeout()
 		var config OllamaMetadataConfig
 		applyOllamaMetadataEnvironment(&config)
-		llm, err := newOllamaMetadataModel(host, llmModel, 0, nil, 0, ollamaHTTPClientWithTimeout(), config)
-		if err != nil {
+		if err := config.Defaults.Validate(); err != nil {
 			return nil, err
 		}
-
-		// Apply rate limiting with isVision=false
-		return NewRateLimitedLLM(llm, getRateLimitConfig(false)), nil
-	case "googleai":
-		ctx := context.Background()
-		apiKey := os.Getenv("GOOGLEAI_API_KEY")
-		var thinkingBudget *int32
-		if val, ok := os.LookupEnv("GOOGLEAI_THINKING_BUDGET"); ok {
-			if v, err := strconv.ParseInt(val, 10, 32); err == nil {
-				if v >= math.MinInt32 && v <= math.MaxInt32 {
-					b := int32(v)
-					thinkingBudget = &b
-				}
+		raw, _ := json.Marshal(config.Defaults)
+		_ = json.Unmarshal(raw, &c.OllamaOptions)
+		for _, key := range []string{"max_tokens", "keep_alive", "think", "format"} {
+			delete(c.OllamaOptions, key)
+		}
+		c.Temperature = config.Defaults.Temperature
+		c.OllamaThink = config.Defaults.Think
+		c.OllamaFormat = config.Defaults.Format
+		if config.Defaults.MaxTokens != nil {
+			c.MaxTokens = *config.Defaults.MaxTokens
+		} else {
+			c.MaxTokens = 0
+		}
+		if config.Defaults.KeepAlive != nil {
+			d, e := parseOllamaKeepAlive(*config.Defaults.KeepAlive)
+			if e != nil {
+				return nil, e
 			}
+			c.KeepAlive = d
 		}
-		provider, err := NewGoogleAIProvider(ctx, llmModel, apiKey, thinkingBudget)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create GoogleAI provider: %w", err)
-		}
-
-		// Apply rate limiting with isVision=false. The Google AI client has
-		// no limiter of its own, so this is what makes
-		// LLM_REQUESTS_PER_MINUTE and LLM_MAX_RETRIES apply to suggestion
-		// calls.
-		return NewRateLimitedLLM(provider, getRateLimitConfig(false)), nil
-	case "anthropic":
-		apiKey := os.Getenv("ANTHROPIC_API_KEY")
-		if apiKey == "" {
-			return nil, fmt.Errorf("ANTHROPIC_API_KEY is not set")
-		}
-		llm, err := anthropic.New(
-			anthropic.WithModel(llmModel),
-			anthropic.WithToken(apiKey),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Apply rate limiting with isVision=false
-		return NewRateLimitedLLM(llm, getRateLimitConfig(false)), nil
-	default:
-		return nil, fmt.Errorf("unsupported LLM provider: %s (supported: openai, ollama, mistral, googleai, anthropic)", llmProvider)
 	}
-}
-
-func createVisionLLM() (llms.Model, error) {
-	switch strings.ToLower(visionLlmProvider) {
-	case "mistral":
-		mistralApiKey := os.Getenv("MISTRAL_API_KEY")
-		if mistralApiKey == "" {
-			return nil, fmt.Errorf("Mistral API key is not set")
-		}
-		llm, err := openai.New(
-			openai.WithToken(mistralApiKey),
-			openai.WithModel(visionLlmModel),
-			openai.WithBaseURL("https://api.mistral.ai/v1"),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Apply rate limiting with isVision=true
-		return NewRateLimitedLLM(llm, getRateLimitConfig(true)), nil
-	case "openai":
-		if openaiAPIKey == "" {
-			return nil, fmt.Errorf("OpenAI API key is not set")
-		}
-
-		options := []openai.Option{
-			openai.WithModel(visionLlmModel),
-			openai.WithToken(openaiAPIKey),
-			openai.WithHTTPClient(createCustomHTTPClient()),
-		}
-
-		if strings.ToLower(os.Getenv("OPENAI_API_TYPE")) == "azure" {
-			baseURL := os.Getenv("OPENAI_BASE_URL")
-			if baseURL == "" {
-				return nil, fmt.Errorf("OPENAI_BASE_URL is required for Azure OpenAI")
-			}
-			options = append(options,
-				openai.WithAPIType(openai.APITypeAzure),
-				openai.WithBaseURL(baseURL),
-				openai.WithEmbeddingModel("this-is-not-used"), // This is mandatory for Azure by langchain-go
-			)
-		} else if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-			// OpenAI-compatible endpoints (OpenRouter, LiteLLM, vLLM, mock
-			// servers in E2E tests, ...)
-			options = append(options, openai.WithBaseURL(baseURL))
-		}
-
-		llm, err := openai.New(options...)
-		if err != nil {
-			return nil, err
-		}
-
-		// Apply rate limiting with isVision=true
-		return NewRateLimitedLLM(llm, getRateLimitConfig(true)), nil
-	case "ollama":
-		host := os.Getenv("OLLAMA_HOST")
-		if host == "" {
-			host = "http://127.0.0.1:11434"
-		}
-		opts := []ollama.Option{
-			ollama.WithModel(visionLlmModel),
-			ollama.WithServerURL(host),
-		}
-		if ctxLenStr := os.Getenv("OLLAMA_CONTEXT_LENGTH"); ctxLenStr != "" {
-			if parsed, err := strconv.Atoi(ctxLenStr); err == nil && parsed > 0 {
-				opts = append(opts, ollama.WithRunnerNumCtx(parsed))
-			} else if err != nil {
-				log.Warnf("Invalid OLLAMA_CONTEXT_LENGTH value: %v, ignoring", err)
+	if strings.ToLower(llmProvider) != "ollama" {
+		if value := os.Getenv("LLM_MAX_TOKENS"); value != "" {
+			if v, e := strconv.Atoi(value); e == nil && v > 0 {
+				c.MaxTokens = v
 			}
 		}
-		if client := ollamaHTTPClientWithTimeout(); client != nil {
-			opts = append(opts, ollama.WithHTTPClient(client))
+		if value := os.Getenv("LLM_TEMPERATURE"); value != "" {
+			if v, e := strconv.ParseFloat(value, 64); e == nil && v >= 0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
+				c.Temperature = &v
+			}
 		}
-		llm, err := ollama.New(opts...)
-		if err != nil {
-			return nil, err
-		}
-
-		// Apply rate limiting with isVision=true
-		return NewRateLimitedLLM(llm, getRateLimitConfig(true)), nil
-	case "googleai":
-		provider, err := ocr.NewGoogleAIProvider(context.Background(), visionLlmModel, os.Getenv("GOOGLEAI_API_KEY"), googleThinkingBudget)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create GoogleAI provider: %w", err)
-		}
-
-		// Apply rate limiting with isVision=true
-		return NewRateLimitedLLM(provider, getRateLimitConfig(true)), nil
-	case "anthropic":
-		apiKey := os.Getenv("ANTHROPIC_API_KEY")
-		if apiKey == "" {
-			return nil, fmt.Errorf("ANTHROPIC_API_KEY is not set")
-		}
-		llm, err := anthropic.New(
-			anthropic.WithModel(visionLlmModel),
-			anthropic.WithToken(apiKey),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Apply rate limiting with isVision=true
-		return NewRateLimitedLLM(llm, getRateLimitConfig(true)), nil
-	default:
-		log.Infoln("Vision LLM not enabled")
-		return nil, nil
 	}
+	return llm.New(context.Background(), c)
 }
 
 func createCustomHTTPClient() *http.Client {
@@ -1520,7 +1350,7 @@ func ollamaRequestTimeout() time.Duration {
 // ollamaHTTPClientWithTimeout wraps the optional header-injecting client from
 // ocr.OllamaHTTPClient() so that Ollama requests always carry a request
 // timeout. Without it both Ollama paths end up on a timeout-less client —
-// http.DefaultClient for the metadata model, langchaingo's default for the
+// a timeout-less client for either the metadata or
 // vision provider — and a single stalled generation freezes the whole
 // background loop indefinitely, recoverable only by restarting the container.
 // Returns nil only when the timeout is explicitly disabled AND no custom header

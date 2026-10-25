@@ -712,7 +712,7 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({
 
       <Section
         title="Prompts"
-        hint="Only the steps this workflow runs show a prompt. Each one either uses the shared global prompt or has its own version for this workflow only."
+        hint="Enabled metadata instructions are combined into one model request. Each field uses its shared instructions or this workflow’s own version."
       >
         {hiddenOwnPrompts.length > 0 && (
           <p className="text-xs text-muted">

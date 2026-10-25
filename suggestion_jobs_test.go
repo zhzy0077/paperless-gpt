@@ -10,29 +10,16 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tmc/langchaingo/llms"
 )
 
 type blockingLLM struct{}
 
-func (m *blockingLLM) CreateEmbedding(_ context.Context, _ []string) ([][]float32, error) {
-	return nil, nil
-}
-
-func (m *blockingLLM) Call(ctx context.Context, prompt string, options ...llms.CallOption) (string, error) {
-	response, err := m.GenerateContent(ctx, []llms.MessageContent{
-		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: prompt}}},
-	}, options...)
-	if err != nil {
-		return "", err
-	}
-	return response.Choices[0].Content, nil
-}
-
-func (m *blockingLLM) GenerateContent(ctx context.Context, _ []llms.MessageContent, _ ...llms.CallOption) (*llms.ContentResponse, error) {
+func (m *blockingLLM) Generate(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }

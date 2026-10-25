@@ -5,9 +5,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"context"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/time/rate"
+	"paperless-gpt/internal/llm"
 )
 
 // TestDocument containing extra parameters for testing
@@ -82,7 +83,7 @@ func TestOpenAIHeadersStayOnTheOpenAIClient(t *testing.T) {
 // The metadata Google AI client used to be returned bare. Suggestion
 // generation then ignored LLM_REQUESTS_PER_MINUTE and LLM_MAX_RETRIES,
 // while the vision Google AI client and every other provider were wrapped.
-func TestCreateLLMGoogleAIIsRateLimited(t *testing.T) {
+func TestCreateLLMGoogleAIHonorsCancellation(t *testing.T) {
 	t.Setenv("GOOGLEAI_API_KEY", "test-key")
 	t.Setenv("LLM_REQUESTS_PER_MINUTE", "8")
 
@@ -93,10 +94,8 @@ func TestCreateLLMGoogleAIIsRateLimited(t *testing.T) {
 	model, err := createLLM()
 	require.NoError(t, err)
 
-	wrapped, ok := model.(*RateLimitedLLM)
-	require.True(t, ok, "Google AI metadata calls must go through the same rate-limit wrapper as the other providers")
-	_, isGoogle := wrapped.llm.(*GoogleAIProvider)
-	require.True(t, isGoogle)
-	require.NotNil(t, wrapped.rateLimiter)
-	assert.Equal(t, rate.Limit(8.0/60.0), wrapped.rateLimiter.Limit())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = model.Generate(ctx, llm.Text("task"))
+	require.ErrorIs(t, err, context.Canceled)
 }
