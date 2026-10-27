@@ -152,3 +152,24 @@ Validation artifacts are retained in the local evaluation directory under `rewri
 To repeat the opt-in receipt benchmark, set OPENAI_API_KEY, OPENAI_BASE_URL, EINO_EVAL_IMAGE, EINO_EVAL_GOLD and EINO_EVAL_MODEL, then run `go test -run '^TestLiveEinoMigration$' -count=1 -v .`. The golden file contains the receipt facts and name/quantity/unit tuples; ordinary tests skip this live request.
 
 Final acceptance: `go test ./...` passes; the live receipt evaluation passes three runs with 21/21 item tuples, the expected metadata, and all ten selected custom fields. The shared model package is checked with the race detector. The production build and formatting checks pass.
+
+## Follow-up review and AMD64 publication (2026-10-27)
+
+Two issues were reproduced and fixed after reviewing commit `477879b`:
+
+- **P2: prompt text could be corrupted by content deduplication.** A short document such as `Invoice` caused a global string replacement to alter instructions, the original title and candidate names. Direct `.Content` output nodes are now replaced in a private template tree. Conditions and transformed content retain the real sanitized input, and shared templates remain unchanged. Regression tests cover short content, conditions, transformations and nested scope.
+- **P2: failed OCR generations lost structured usage.** Output-limit failures were converted to plain errors before page usage could be persisted. The shared model layer now returns a typed error carrying token usage. Image, per-page PDF and whole-PDF jobs persist the failed page's usage and output-limit flag while failing the job before incomplete text reaches a PDF. Regression tests exercise all three processing modes.
+
+Local validation: the full backend suite, shared model race checks, frontend production build, formatting and workflow syntax checks pass. Three fresh runs of the live DeepSeek receipt test each retain 21/21 item tuples, the expected standard metadata and all ten custom fields. Frontend lint reports 21 findings, matching the pre-refactor parent by file, rule and severity.
+
+`.github/workflows/ghcr-amd64.yml` publishes this fork's `refactor/eino-llm` branch on pushes and supports manual dispatch. It runs backend tests, model race checks and the frontend build, then builds `linux/amd64` on a native x86_64 runner. Mock-LLM Playwright E2E and container startup/embedded-frontend checks run against the built image before registry login and publication. Registry authentication uses the workflow's `GITHUB_TOKEN`; model API keys are unnecessary.
+
+Published tags:
+
+- `ghcr.io/zhzy0077/paperless-gpt:eino-amd64` — newest successfully tested build of this branch.
+- `ghcr.io/zhzy0077/paperless-gpt:sha-<full-commit>-amd64` — the corresponding source commit.
+
+```sh
+docker pull ghcr.io/zhzy0077/paperless-gpt:eino-amd64
+gh workflow run ghcr-amd64.yml --repo zhzy0077/paperless-gpt --ref refactor/eino-llm
+```

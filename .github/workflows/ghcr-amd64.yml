@@ -1,0 +1,145 @@
+name: Publish Eino image (AMD64)
+
+on:
+  push:
+    branches: [refactor/eino-llm]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-eino-amd64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'zhzy0077/paperless-gpt' && github.ref == 'refs/heads/refactor/eino-llm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web-app/package-lock.json
+      - name: Install and build frontend
+        working-directory: web-app
+        run: npm ci && npm run build
+      - name: Check Go formatting
+        run: |
+          files=$(gofmt -l .)
+          if [[ -n "$files" ]]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+      - name: Backend tests
+        run: go test -timeout 10m ./...
+      - name: Model concurrency tests
+        run: go test -race -timeout 10m ./internal/llm
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - name: Image names and build metadata
+        id: image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "immutable=${image}:sha-${GITHUB_SHA}-amd64" >> "$GITHUB_OUTPUT"
+          echo "branch=${image}:eino-amd64" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Build AMD64 image for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: |
+            ${{ steps.image.outputs.immutable }}
+            ${{ steps.image.outputs.branch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=eino-amd64
+          cache-to: type=gha,mode=max,scope=eino-amd64
+          build-args: |
+            VERSION=eino-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.image.outputs.created }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web-app/package-lock.json
+      - name: Install E2E dependencies
+        working-directory: web-app
+        run: npm ci && npx playwright install chromium --with-deps
+      - name: Mock LLM end-to-end tests
+        working-directory: web-app
+        run: npm run test:e2e:mock -- --reporter=line,html
+        env:
+          CI: 'true'
+          PAPERLESS_GPT_IMAGE: ${{ steps.image.outputs.immutable }}
+      - name: Verify AMD64 image startup and embedded frontend
+        env:
+          IMAGE: ${{ steps.image.outputs.immutable }}
+        run: |
+          test "$(docker image inspect "$IMAGE" --format '{{.Architecture}}')" = amd64
+          trap 'docker logs eino-image-smoke; docker rm -f eino-image-smoke' EXIT
+          docker run -d --name eino-image-smoke -p 127.0.0.1:18081:8080 \
+            -e PAPERLESS_BASE_URL=http://127.0.0.1:9 \
+            -e PAPERLESS_API_TOKEN=smoke-test \
+            -e LLM_PROVIDER=ollama -e LLM_MODEL=smoke-test \
+            -e OLLAMA_HOST=http://127.0.0.1:9 "$IMAGE"
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18081/api/version > /tmp/eino-version.json; then
+              break
+            fi
+            sleep 2
+          done
+          jq -e --arg sha "$GITHUB_SHA" '.commit == $sha' /tmp/eino-version.json
+          curl -fsS http://127.0.0.1:18081/ | grep -q '<div id="root">'
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested image
+        env:
+          IMMUTABLE_IMAGE: ${{ steps.image.outputs.immutable }}
+          BRANCH_IMAGE: ${{ steps.image.outputs.branch }}
+        run: |
+          docker push "$IMMUTABLE_IMAGE"
+          docker push "$BRANCH_IMAGE"
+          {
+            echo '### Eino AMD64 container'
+            echo "\`docker pull ${BRANCH_IMAGE}\`"
+            echo "Immutable image: \`${IMMUTABLE_IMAGE}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload E2E reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: eino-amd64-e2e
+          path: |
+            web-app/playwright-report/
+            web-app/test-results/
+          retention-days: 14
