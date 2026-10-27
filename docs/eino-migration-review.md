@@ -162,6 +162,10 @@ Two issues were reproduced and fixed after reviewing commit `477879b`:
 
 Local validation: the full backend suite, shared model race checks, frontend production build, formatting and workflow syntax checks pass. Three fresh runs of the live DeepSeek receipt test each retain 21/21 item tuples, the expected standard metadata and all ten custom fields. Frontend lint reports 21 findings, matching the pre-refactor parent by file, rule and severity.
 
+**Remaining P2: native Anthropic SDK retries multiply policy attempts.** A captured HTTP-503 test with the shared policy's `MaxRetries=0` makes one wire request through OpenAI-compatible and Gemini adapters, and three through the native Claude adapter. Claude's SDK defaults to two internal retries; Eino Claude v0.1.26 does not expose its SDK retry option. Native Anthropic users therefore do not get the configured wire-attempt bound. This needs an adapter change that exposes `anthropic.WithMaxRetries(0)` before the shared policy can be the sole retry owner. The live DeepSeek evaluation uses the OpenAI-compatible adapter.
+
+The first native AMD64 CI build also exposed an expired Alpine `musl-dev` pin. The Dockerfile now pins the available `1.2.6-r3` revision; the build continues through the same workflow gates.
+
 `.github/workflows/ghcr-amd64.yml` publishes this fork's `refactor/eino-llm` branch on pushes and supports manual dispatch. It runs backend tests, model race checks and the frontend build, then builds `linux/amd64` on a native x86_64 runner. Mock-LLM Playwright E2E and container startup/embedded-frontend checks run against the built image before registry login and publication. Registry authentication uses the workflow's `GITHUB_TOKEN`; model API keys are unnecessary.
 
 Published tags:
