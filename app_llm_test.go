@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"text/template"
 )
 
 type mockLLM struct {
@@ -349,6 +350,27 @@ func TestMetadataNoEnabledFieldsMakesNoRequest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, doc.Title, got.SuggestedTitle)
 	assert.Equal(t, doc.Tags, got.SuggestedTags)
+}
+
+func TestMetadataInstructionsKeepShortContentInInstructionsAndCandidates(t *testing.T) {
+	setupMetadataTest(t)
+	wf := &WorkflowConfig{ID: "short-content", Prompts: map[string]string{
+		"title_prompt": `Invoice rules; title={{.Title}}; tags={{.AvailableTags | join ", "}}; {{if eq .Content "Invoice"}}body={{.Content}}{{end}}`,
+	}}
+	plan, err := (&App{}).planMetadata(context.Background(), GenerateSuggestionsRequest{GenerateTitles: true, Workflow: wf}, Document{Title: "Invoice", Content: "Invoice"}, suggestionGenerationContext{availableTagNames: []string{"Invoice"}})
+	require.NoError(t, err)
+	assert.Contains(t, plan.instructions, "Invoice rules; title=Invoice; tags=Invoice; body=[document content provided above]")
+}
+
+func TestMetadataInstructionRenderingPreservesTemplateLogicAndOriginalTree(t *testing.T) {
+	tmpl := template.Must(template.New("instructions").Funcs(template.FuncMap{"upper": strings.ToUpper}).Parse(`{{if eq .Content "invoice"}}{{.Content}}{{end}}|{{.Content | upper}}|{{with .Nested}}{{.Content}}{{end}}`))
+	data := map[string]any{"Content": "invoice", "Nested": map[string]any{"Content": "nested"}}
+	got, err := renderMetadataInstructions(tmpl, data)
+	require.NoError(t, err)
+	assert.Equal(t, "[document content provided above]|INVOICE|nested", got)
+	var original strings.Builder
+	require.NoError(t, tmpl.Execute(&original, data))
+	assert.Equal(t, "invoice|INVOICE|nested", original.String())
 }
 func TestMetadataWorkflowInstructionsAndFlags(t *testing.T) {
 	setupMetadataTest(t)

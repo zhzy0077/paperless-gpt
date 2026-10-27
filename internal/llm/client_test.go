@@ -61,6 +61,21 @@ func TestEinoImageToolAndThinkingWire(t *testing.T) {
 	msg := wire["messages"].([]any)[0].(map[string]any)
 	assert.Equal(t, "data:image/png;base64,"+b64, msg["content"].([]any)[1].(map[string]any)["image_url"].(map[string]any)["url"])
 }
+
+func TestOutputLimitPreservesUsage(t *testing.T) {
+	m := modelFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+		return &schema.Message{ResponseMeta: &schema.ResponseMeta{
+			FinishReason: "MAX_TOKENS",
+			Usage:        &schema.TokenUsage{PromptTokens: 100, CompletionTokens: 8192, TotalTokens: 8292},
+		}}, nil
+	})
+	out, err := Generate(context.Background(), m, Text("read"), Object(map[string]*jsonschema.Schema{"text": {Type: "string"}}))
+	assert.Nil(t, out)
+	var exhausted *OutputLimitError
+	require.ErrorAs(t, err, &exhausted)
+	assert.Equal(t, "MAX_TOKENS", exhausted.FinishReason)
+	assert.Equal(t, 8292, exhausted.Usage["TotalTokens"])
+}
 func TestRetryPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

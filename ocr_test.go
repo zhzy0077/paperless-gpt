@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"paperless-gpt/internal/llm"
 	"paperless-gpt/ocr"
 
 	"github.com/sirupsen/logrus"
@@ -20,6 +21,44 @@ import (
 
 type recordingOCRProvider struct {
 	pages []int
+}
+
+type exhaustedOCRProvider struct{}
+
+func (exhaustedOCRProvider) ProcessImage(context.Context, []byte, int) (*ocr.OCRResult, error) {
+	return nil, fmt.Errorf("page failed: %w", &llm.OutputLimitError{
+		FinishReason: "length", Usage: map[string]any{"PromptTokens": 100, "CompletionTokens": 8192, "TotalTokens": 8292},
+	})
+}
+
+func TestProcessDocumentOCR_PersistsExhaustedGenerationUsage(t *testing.T) {
+	for _, mode := range []string{"image", "pdf", "whole_pdf"} {
+		t.Run(mode, func(t *testing.T) {
+			env := newTestEnv(t)
+			defer env.teardown()
+			require.NoError(t, env.db.AutoMigrate(&OCRPageResult{}))
+			pdf, err := os.ReadFile("tests/pdf/five-pager.pdf")
+			require.NoError(t, err)
+			const documentID = 1038
+			env.setMockResponse(fmt.Sprintf("/api/documents/%d/download/", documentID), func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(pdf)
+			})
+			env.client.CacheFolder = t.TempDir()
+			app := &App{Client: env.client, Database: env.db, ocrProvider: exhaustedOCRProvider{}}
+			result, err := app.ProcessDocumentOCR(context.Background(), documentID, OCROptions{ProcessMode: mode, PromptOverride: "Read"}, "failed-"+mode)
+			require.ErrorContains(t, err, "budget exhausted")
+			assert.Nil(t, result)
+			var page OCRPageResult
+			require.NoError(t, env.db.Where("job_id = ?", "failed-"+mode).First(&page).Error)
+			assert.Empty(t, page.Text)
+			assert.True(t, page.OcrLimitHit)
+			var usage map[string]any
+			require.NoError(t, json.Unmarshal([]byte(page.GenerationInfo), &usage))
+			assert.Equal(t, float64(8292), usage["TotalTokens"])
+			assert.Equal(t, true, usage["GenerationFailed"])
+			assert.Equal(t, "length", usage["FinishReason"])
+		})
+	}
 }
 
 func (p *recordingOCRProvider) ProcessImage(_ context.Context, _ []byte, pageNumber int) (*ocr.OCRResult, error) {

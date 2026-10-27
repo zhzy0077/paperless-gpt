@@ -23,6 +23,16 @@ type Model interface {
 
 const ResultTool = "submit_document_result"
 
+// OutputLimitError preserves usage when an incomplete generation is rejected.
+type OutputLimitError struct {
+	FinishReason string
+	Usage        map[string]any
+}
+
+func (e *OutputLimitError) Error() string {
+	return fmt.Sprintf("LLM output budget exhausted (usage: %+v)", e.Usage)
+}
+
 // Generate returns either free-form text or validated arguments of the result tool.
 // The schema is sent exclusively through the tool definition.
 func Generate(ctx context.Context, client Model, messages []*schema.Message, spec *jsonschema.Schema, opts ...model.Option) (*schema.Message, error) {
@@ -40,7 +50,7 @@ func Generate(ctx context.Context, client Model, messages []*schema.Message, spe
 		return nil, errors.New("LLM returned no response")
 	}
 	if out.ResponseMeta != nil && (strings.EqualFold(out.ResponseMeta.FinishReason, "length") || strings.EqualFold(out.ResponseMeta.FinishReason, "max_tokens")) {
-		return nil, fmt.Errorf("LLM output budget exhausted (usage: %+v)", out.ResponseMeta.Usage)
+		return nil, &OutputLimitError{FinishReason: out.ResponseMeta.FinishReason, Usage: Usage(out)}
 	}
 	if spec != nil {
 		if len(out.ToolCalls) != 1 || out.ToolCalls[0].Function.Name != ResultTool {
@@ -165,7 +175,7 @@ func Text(prompt string) []*schema.Message {
 }
 func Usage(out *schema.Message) map[string]any {
 	info := map[string]any{}
-	if out.ResponseMeta != nil && out.ResponseMeta.Usage != nil {
+	if out != nil && out.ResponseMeta != nil && out.ResponseMeta.Usage != nil {
 		u := out.ResponseMeta.Usage
 		info["PromptTokens"] = u.PromptTokens
 		info["CompletionTokens"] = u.CompletionTokens

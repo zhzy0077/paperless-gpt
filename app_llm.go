@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"text/template"
+	"text/template/parse"
 	"time"
 	"unicode"
 
@@ -227,18 +228,57 @@ func (app *App) planMetadata(ctx context.Context, request GenerateSuggestionsReq
 		if tmpl == nil {
 			return plan, fmt.Errorf("%s template is not loaded", t.prompt)
 		}
-		var rendered bytes.Buffer
-		if err := tmpl.Execute(&rendered, data); err != nil {
+		text, err := renderMetadataInstructions(tmpl, data)
+		if err != nil {
 			return plan, fmt.Errorf("%s: %w", t.prompt, err)
-		}
-		text := rendered.String()
-		if content, _ := data["Content"].(string); content != "" {
-			text = strings.ReplaceAll(text, content, "[document content provided above]")
 		}
 		fmt.Fprintf(&instructions, "\n<task field=%q>\n%s\n</task>\n", t.key, text)
 	}
 	plan.instructions = instructions.String()
 	return plan, nil
+}
+
+// Replace direct .Content outputs in a private tree, keeping document text
+// available to template conditions and transformations. Replacing rendered
+// substrings would also corrupt instructions, titles and candidate names.
+func renderMetadataInstructions(tmpl *template.Template, data map[string]any) (string, error) {
+	clone, err := tmpl.Clone()
+	if err != nil {
+		return "", err
+	}
+	tree := tmpl.Tree.Copy()
+	var replaceContent func(*parse.ListNode)
+	replaceContent = func(list *parse.ListNode) {
+		if list == nil {
+			return
+		}
+		for _, node := range list.Nodes {
+			switch n := node.(type) {
+			case *parse.ActionNode:
+				if len(n.Pipe.Cmds) == 1 && len(n.Pipe.Decl) == 0 && len(n.Pipe.Cmds[0].Args) == 1 {
+					if field, ok := n.Pipe.Cmds[0].Args[0].(*parse.FieldNode); ok && slices.Equal(field.Ident, []string{"Content"}) {
+						const marker = "[document content provided above]"
+						n.Pipe.Cmds[0].Args[0] = &parse.StringNode{NodeType: parse.NodeString, Pos: field.Pos, Quoted: strconv.Quote(marker), Text: marker}
+					}
+				}
+			case *parse.IfNode:
+				replaceContent(n.List)
+				replaceContent(n.ElseList)
+			// range/with change dot; their bodies must keep their own .Content.
+			case *parse.RangeNode:
+				replaceContent(n.ElseList)
+			case *parse.WithNode:
+				replaceContent(n.ElseList)
+			}
+		}
+	}
+	replaceContent(tree.Root)
+	if _, err = clone.AddParseTree(tmpl.Name(), tree); err != nil {
+		return "", err
+	}
+	var rendered bytes.Buffer
+	err = clone.Execute(&rendered, data)
+	return rendered.String(), err
 }
 
 func escapeXMLAttr(s string) string {

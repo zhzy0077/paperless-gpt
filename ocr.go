@@ -10,12 +10,36 @@ import (
 	"strings"
 	"time"
 
+	"paperless-gpt/internal/llm"
 	"paperless-gpt/ocr"
 
 	"github.com/gardar/ocrchestra/pkg/hocr"
 	"github.com/gardar/ocrchestra/pkg/pdfocr"
 	"github.com/sirupsen/logrus"
 )
+
+// recordOCRGenerationFailure records billed tokens for a failed page without
+// counting the page as completed or allowing incomplete text into a PDF.
+func (app *App) recordOCRGenerationFailure(documentID int, jobID string, pageIndex int, err error, logger *logrus.Entry) {
+	var exhausted *llm.OutputLimitError
+	if app.Database == nil || jobID == "" || !errors.As(err, &exhausted) {
+		return
+	}
+	info := make(map[string]any, len(exhausted.Usage)+2)
+	for key, value := range exhausted.Usage {
+		info[key] = value
+	}
+	info["FinishReason"] = exhausted.FinishReason
+	info["GenerationFailed"] = true
+	raw, marshalErr := json.Marshal(info)
+	if marshalErr != nil {
+		logger.WithError(marshalErr).Warn("Failed to encode incomplete OCR usage")
+		return
+	}
+	if saveErr := SaveSingleOcrPageResult(app.Database, documentID, jobID, pageIndex, "", true, string(raw)); saveErr != nil {
+		logger.WithError(saveErr).Warn("Failed to save incomplete OCR usage")
+	}
+}
 
 // ocrSupportsPromptOverride reports whether the configured provider honors a
 // per-run prompt (only the LLM provider does). Used to reject overrides that
@@ -220,6 +244,7 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 		// Process the whole PDF in one go
 		result, err := provider.ProcessImage(ctx, originalPDFData, 0) // Page 0 indicates entire document
 		if err != nil {
+			app.recordOCRGenerationFailure(documentID, jobID, 0, err, docLogger)
 			return nil, fmt.Errorf("error performing OCR for document %d: %w", documentID, err)
 		}
 
@@ -293,6 +318,7 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 			// Pass the page number (1-based index) to ProcessImage
 			result, err := provider.ProcessImage(ctx, pdfContent, i+1)
 			if err != nil {
+				app.recordOCRGenerationFailure(documentID, jobID, i, err, pageLogger)
 				return nil, fmt.Errorf("error performing OCR for document %d, page %d: %w", documentID, i+1, err)
 			}
 			if result == nil {
@@ -402,6 +428,7 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 				// Pass the page number (1-based index) to ProcessImage
 				result, err = provider.ProcessImage(ctx, imageContent, i+1)
 				if err != nil {
+					app.recordOCRGenerationFailure(documentID, jobID, i, err, pageLogger)
 					return nil, fmt.Errorf("error performing OCR for document %d, page %d: %w", documentID, i+1, err)
 				}
 			}
